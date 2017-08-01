@@ -1,0 +1,647 @@
+---
+title: "Capstone"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r Load Housing data}
+data <- read.csv("C:\\Users\\William\\Documents\\Ryerson\\Summer 2017\\Datasets\\Housing Prices\\AmesPrices.csv", header = TRUE, stringsAsFactors = FALSE)
+```
+
+
+```{r Load Packages, echo=FALSE}
+require(caret)
+require(corrplot)
+require(e1071) #skew
+require(Metrics) #rmse
+require(MASS)
+require(randomForest)
+require(party)
+require(ggplot2)
+require(glmnet)
+require(rattle)					# Fancy tree plot
+require(rpart.plot)				# Enhanced tree plots
+require(RColorBrewer)				# Color selection for fancy tree plot
+require(party)					# Alternative decision tree algorithm
+require(partykit)				# Convert rpart object to BinaryTree
+require(dplyr)
+```
+
+##Find the Columns with NAs
+```{r Find the Columns with NAs, echo=TRUE}
+na.cols <- which(colSums(is.na(data)) > 0)
+mi <-colSums(is.na(data[na.cols]))
+mi
+```
+
+##Filling in the NAs
+
+```{r PoolQC, echo=TRUE}
+table(data$PoolQC)
+pool <- data[data$PoolArea == 0, c("PoolArea", "PoolQC")]
+pool
+
+data[is.na(data$PoolQC), "PoolQC"] <- "None"
+```
+
+```{r Garage Columns, echo = TRUE}
+colSums(is.na(data[na.cols])) # all 5 Garage columns with NAs have 81 missing values
+garage.data <- c("GarageYrBlt", "GarageArea", "GarageCars", "GarageQual", "GarageFinish", "GarageCond", "GarageType")
+
+garage <- data[is.na(data$GarageCond), garage.data]
+garage
+
+sum(garage$GarageCars) #All NAs have 0 for GarageArea and GarageCars. Which means they have no garage
+
+for (a in garage.data) {
+  if(sapply(data[a], is.numeric) == TRUE) {
+    data[sapply(data[a], is.na), a] <- 0
+  }
+  else {
+    data[sapply(data[a], is.na),a] <- "None"
+  }
+}
+```
+
+```{r Electrical, echo = TRUE}
+colSums(is.na(data[na.cols]))
+table(data$Electrical)
+
+data[is.na(data$Electrical), "Electrical"] <- "SBrkr"
+```
+
+```{r MasVnrType & MasVnr, echo = TRUE}
+mason <- data[is.na(data$MasVnrArea), c("MasVnrArea", "MasVnrType")]
+mason #assume they don't have any Masonry veneer
+
+data[is.na(data$MasVnrArea), "MasVnrArea"] <- 0
+data[is.na(data$MasVnrType), "MasVnrType"] <- "None"
+```
+
+```{r Bsmt Columns, echo = TRUE}
+colSums(is.na(data[na.cols]))
+
+# Get all bsmt columns subset into a different frame
+bsmt <- data[is.na(data$BsmtExposure) | is.na(data$BsmtFinType2),c(31:39,48,49)] 
+bsmt
+
+  #Only 1 BsmtExposure variable is NA and actually have a basementSF value. We can fill with most common value (No)
+data[949,"BsmtExposure"] <- "No"
+
+  #All other NAs are because the house does not have a basement total SF = 0. Fill these with NoBsmt
+data[is.na(data$BsmtQual), "BsmtQual"] <- "None"
+data[is.na(data$BsmtCond), "BsmtCond"] <- "None"
+data[is.na(data$BsmtExposure), "BsmtExposure"] <- "None"
+data[is.na(data$BsmtFinType1), "BsmtFinType1"] <- "None"
+
+  #Row 333 has a NA in BsmtFinType2 but it has a value for BsmtFinSF2. We will fill with the most common value which is "Unf"
+data[333, "BsmtFinType2"] <- "Unf"
+data[is.na(data$BsmtFinType2), "BsmtFinType2"] <- "None"
+```
+
+```{r LotFrontage 259 NAs, echo = TRUE}
+
+lotfront <- data[is.na(data$LotFrontage), c("LotFrontage", "Neighborhood")]
+lotfront
+
+frontagevalues <- data[!is.na(data$LotFrontage), c("LotFrontage", "Neighborhood")]
+frontagevalues
+
+fillfrontage <- frontagevalues %>% group_by(Neighborhood) %>% summarise(mean = mean(LotFrontage))
+fillfrontage
+
+frontagevalues$Neighborhood<- as.factor(frontagevalues$Neighborhood)
+  #fill in the mean lot frontage value based on neighborhood
+x <- which(is.na(data$LotFrontage)) #returns row numbers of NA values
+
+for (i in x) {
+  frontmean <- as.numeric(fillfrontage[fillfrontage == data$Neighborhood[i], "mean"])
+  data$LotFrontage[i] <- frontmean
+}
+```
+
+```{r Alley-Fence-FireplaceQu-MiscFeature, echo = TRUE}
+####Alley has 1369 NA values
+  #we will fill these with None as we can assume they don't have access to alley
+data[is.na(data$Alley), "Alley"] <- "None"
+
+####Fence has 1179 NA Values
+  #We will fill these with None since there is probably no Fence
+data[is.na(data$Fence), "Fence"] <- "None"
+
+####FireplaceQu has 690 NAs
+  #Find out if NAs are a result of 0 Fireplaces
+firepl <- data[is.na(data$FireplaceQu), c("FireplaceQu", "Fireplaces")]
+data[is.na(data$FireplaceQu), "FireplaceQu"] <- "None"
+
+#### MiscFeature has 1406 NA values
+  #we can assume these houses don't have any MiscFeatures. Fill with none.
+data[is.na(data$MiscFeature), "MiscFeature"] <- "None"
+
+ #LotFrontage was showing as list. Convert it into Numeric
+data$LotFrontage <- as.numeric(data$LotFrontage)
+```
+
+##CLEANED DATA
+```{r CLEANED DATA, echo=TRUE}
+#Save this data set as cleaned data - All NAs filled
+data.clean <- data
+```
+
+
+##Splitting the data into Numeric & Categorical variables
+```{r Split, echo=TRUE}
+ 
+ #numeric - 38 variables
+num.col <- names(which(sapply(data, is.numeric)))
+num.dat <- data[,num.col]
+  #catogorical - 43 variables
+cat.col <-names(which(sapply(data, is.character)))
+cat.dat <- data[,cat.col]
+```
+
+##Function to see how ordinal data relate to SalePrice
+```{r price.tbl function, echo=TRUE}
+price.tbl <- function(col) {
+  col.price <- data[,c(col, 'SalePrice')] %>% group_by_(col) %>% summarise(mean.price = mean(SalePrice), cnt = n()) %>% arrange(mean.price)
+  return(col.price)
+}
+
+##function to map ordinal value to numbers
+###function to convert ordinal values to numbers
+map.fcn <- function(cols, map.list, df){
+  for (col in cols){
+    df[col] <- as.numeric(map.list[data[,col]])
+  }
+  return(df)
+}
+```
+
+##Converting ordinal data into numeric
+```{r ordinal to numeric, echo=TRUE}
+
+###Columns with ordinal data
+  ###
+qa.col <- c('ExterQual', 'ExterCond', 'BsmtQual', 'BsmtCond', 'HeatingQC', 'KitchenQual', 'FireplaceQu', 'GarageQual', 'GarageCond')
+ord.values <- c("None" = 0, "Po" = 1, "Fa" = 2, "TA" = 3, "Gd" = 4, "Ex" = 5)
+
+###Convert the qa.col columns from ordinal data to numeric data
+qa.col <- c('ExterQual', 'ExterCond', 'BsmtQual', 'BsmtCond', 'HeatingQC', 'KitchenQual', 'FireplaceQu', 'GarageQual', 'GarageCond')
+num.dat <- map.fcn(qa.col, ord.values, num.dat)
+
+###BsmtExposure
+price.tbl('BsmtExposure')
+bsmt.ord.values <- c("None" = 0, "No" = 1, "Mn" = 2, "Av" = 3, "Gd" = 4)
+num.dat <- map.fcn(c('BsmtExposure'), bsmt.ord.values, num.dat)
+
+###GarageFinish
+price.tbl('GarageFinish')
+gfin.ord.values <- c("None" = 0, "Unf" = 1, "RFn" = 2, "Fin" = 3)
+num.dat <- map.fcn(c('GarageFinish'), gfin.ord.values, num.dat)
+
+###Fence
+price.tbl('Fence')
+fen.ord.values <- c("None" = 0, "MnWw" = 1, "GdWo" = 2, "MnPrv" = 3,"GdPrv" = 4)
+num.dat <- map.fcn(c('Fence'), fen.ord.values, num.dat)
+
+###Functional - Home Functionality 
+  #'Typ' has 1360 obs out of 1460. Maybe just code it as 0 & 1?
+price.tbl('Functional')
+fun.ord.values <- c("None" = 0, "Sal" = 1, "Sev" = 2, "Maj2" = 3, "Maj1" = 4, "Mod" = 5, "Min2" = 6, "Min1" = 7, "Typ" = 8)
+
+num.dat <- map.fcn(c('Functional'), fun.ord.values, num.dat)
+
+###Bsmt Fin Type 1 from ord to num
+
+price.tbl('BsmtFinType1')
+
+#bsmt1&2 Ord to Values
+AvgBsmtArea1 <- data[,c('BsmtFinType1', 'BsmtFinSF1')] %>% group_by_('BsmtFinType1') %>% summarise(meanArea = mean(BsmtFinSF1), count = n())
+
+bsmt1.ord.values <- c('None' = 0, 'Unf' = 1, 'LwQ' = 2, 'Rec' = 3, 'BLQ' = 4, 'ALQ' = 5, 'GLQ' = 6)
+num.dat <- map.fcn(c('BsmtFinType1'), bsmt1.ord.values, num.dat)
+
+bsmt1.ord.values <- c('None' = 0, 'Unf' = 1, 'LwQ' = 2, 'Rec' = 3, 'BLQ' = 4, 'ALQ' = 5, 'GLQ' = 6)
+num.dat <- map.fcn(c('BsmtFinType2'), bsmt1.ord.values, num.dat)
+```
+
+##Correlation
+```{r Correlation plot, echo=TRUE}
+###Correlation Plot
+  #Determine Correlation of Numeric Variables
+require(corrplot)
+num.dat <- subset(num.dat, select = -Id)
+Correlation <- cor(num.dat)
+Cor.Saleprice <- as.matrix(sort(Correlation[,'SalePrice'], decreasing = TRUE))
+
+  #select the values that are >0.5 or < -0.5
+cor.colnames <- names(which(apply(Cor.Saleprice,1,function(x) (x>0.5 | x< -0.5))))
+corrplot(as.matrix(Correlation[cor.colnames,cor.colnames]), type = 'full', method='color', addCoef.col = 'black', t1.cex = 0.5, cl.cex = 0.5, number.cex = 0.5)
+
+###################################################################################################
+###Pairs Plot - Correlation Matrix
+panel.cor <- function(x, y, digits=2, prefix="", cex.cor) 
+{
+  usr <- par("usr"); on.exit(par(usr)) 
+  par(usr = c(0, 1, 0, 1)) 
+  r <- abs(cor(x, y)) 
+  txt <- format(c(r, 0.123456789), digits=digits)[1] 
+  txt <- paste(prefix, txt, sep="") 
+  if(missing(cex.cor)) cex <- 0.8/strwidth(txt) 
+  
+  test <- cor.test(x,y) 
+
+  Signif <- symnum(test$p.value, corr = FALSE, na = FALSE, 
+                   cutpoints = c(0, 0.001, 0.01, 0.05, 0.1, 1),
+                   symbols = c("***", "**", "*", ".", " ")) 
+  
+  text(0.5, 0.5, txt, cex = cex * r) 
+  text(.8, .8, Signif, cex=cex, col=2) 
+}
+
+###Correlation Matrix with selected variables
+pairs(SalePrice ~ OverallQual+ GrLivArea + TotalBsmtSF + X1stFlrSF + FullBath +TotRmsAbvGrd, data = num.dat, lower.panel = panel.smooth, upper.panel = panel.cor)
+
+```
+
+##Categorical to numeric data
+```{r cat to numeric, echo = TRUE}
+#Building Type Prices: Grouping townhouse end units with single family houses since they have high saleprices.
+bldgType.price <- data[,c("BldgType", 'SalePrice')] %>% group_by_('BldgType') %>% summarise(mean.price = mean(SalePrice), cnt = n()) %>% arrange(mean.price)
+bldgType.price
+num.dat['TwnhsE.1Fam'] <- (data$BldgType == 'TwnhsE' | data$BldgType == '1Fam') *1
+
+#RoofStyle: Grp by highest mean saleprice; Hip & Shed
+roofstyle.price <- data[,c("RoofStyle", 'SalePrice')] %>% group_by_('RoofStyle') %>% summarise(mean.price = mean(SalePrice), cnt = n()) %>% arrange(mean.price)
+roofstyle.price
+
+num.dat['HipShedRoof'] <- (data$RoofStyle == 'Hip' | data$RoofStyle == 'Shed') *1
+
+#RoofMat: Gro Membran, WdShake and WdShngl together. They have over $200K saleprice
+roofmat.price <- data[,c("RoofMatl", 'SalePrice')] %>% group_by_('RoofMatl') %>% summarise(mean.price = mean(SalePrice), cnt = n()) %>% arrange(mean.price)
+num.dat['GdRoofMatl'] <- (data$RoofMatl == 'Membran' | data$RoofMatl == 'WdShake' | data$RoofMatl == 'WdShngl') *1
+
+#HouseStyle
+housestyle.price <- data[,c("HouseStyle", 'SalePrice')] %>% group_by_('HouseStyle') %>% summarise(mean.price = mean(SalePrice), cnt = n()) %>% arrange(mean.price)
+#Price levels: mean prices of neighborhoods: <140k = 1, >=140k<200k = 2, >200k = 3
+housestyle.lvl <- c('1.5Unf' = 1, 'SFoyer' = 1, '1.5Fin' = 2, '2.5Unf' = 2, 'SLvl' = 2, '1Story' = 2, '2Story' = 3, '2.5Fin' = 3)
+num.dat$HouStyle.Price.lvl <- as.numeric(housestyle.lvl[data[,'HouseStyle']])
+
+###Neighborhood Pricing#
+nbh_price <- data[,c("Neighborhood", 'SalePrice')] %>% group_by_('Neighborhood') %>% summarise(mean.price = mean(SalePrice), cnt = n()) %>% arrange(mean.price)
+##nbh_lvls: mean prices of neighborhoods: <140k = 1, >=140k<200k = 2, >200k = 3
+nbh.lvl <- c('MeadowV' = 1, 'IDOTRR' = 1, 'BrDale' = 1, 'BrkSide' = 1, 'Edwards' = 1, 'OldTown' = 1, 'Sawyer' = 1, 'Blueste' = 1, 'SWISU' = 2, 'NPkVill' = 2, 'NAmes' = 2, 'Mitchel' = 2, 'SawyerW' = 2, 'NWAmes' = 2, 'Gilbert' = 2, 'Blmngtn' = 2, 'CollgCr' = 2, 'Crawfor' = 3, 'ClearCr' = 3, 'Somerst' = 3, 'Veenker' = 3, 'Timber' = 3, 'StoneBr' = 3, 'NridgHt' = 3, 'NoRidge' = 3)
+num.dat$nbh.price.lvl <- as.numeric(nbh.lvl[data[,'Neighborhood']])
+
+##Exterior1st pricing
+price.tbl('Exterior1st')
+ext1st.lvl <- c('BrkComm' = 1, 'AsphShn' = 1, 'CBlock' = 1, 'AsbShng' = 1, 'MetalSd' = 2, 'Wd Sdng' = 2, 'WdShing' = 2, 'Stucco' = 2, 'HdBoard' = 2, 'Plywood' = 2, 'BrkFace' = 2, 'VinylSd' = 3, 'CemntBd' = 3, 'Stone' = 3, 'ImStucc' = 3)
+num.dat$Ext1st.price.lvl <- as.numeric(ext1st.lvl[data[,'Exterior1st']])
+
+##Exterior2nd Pricing
+price.tbl('Exterior2nd')
+ext2nd.lvl <- c('CBlock' = 1, 'AsbShng' = 1, 'Brk Cmn' = 1, 'AsphShn' = 1, 'Wd Sdng' = 2, 'MetalSd' = 2, 'Stucco' = 2, 'Stone' = 2, 'Wd Shng' = 2, 'HdBoard' = 2, 'Plywood' = 2, 'BrkFace' = 2, 'VinylSd' = 3, 'CmentBd' = 3, 'ImStucc' = 3, 'Other' = 3)
+num.dat$Ext2nd.price.lvl <- as.numeric(ext2nd.lvl[data[,'Exterior2nd']])
+
+##SaleType Pricing; Group var with similar mean saleprice together
+price.tbl('SaleType')
+saletype.lvl <- c('Oth' = 1, 'ConLD' = 1, 'ConLw' = 2, 'COD' = 2, 'WD' = 3, 'ConLI' = 4, 'CWD' = 4, 'Con' = 5, 'New' = 5)
+num.dat$SaleType.price.lvl <- as.numeric(saletype.lvl[data[,'SaleType']])
+
+##SaleCondition
+price.tbl('SaleCondition')
+salecond.lvl <- c('AdjLand' = 1, 'Abnorml' = 2, 'Family' = 2, 'Alloca' = 3, 'Normal' = 3, 'Partial' = 4)
+num.dat$SaleCond.price.lvl <- as.numeric(salecond.lvl[data[,'SaleCondition']])
+
+##MSZoning
+price.tbl('MSZoning')
+mszoning.lvl <- c('C (all)' = 1, 'RM' = 2, 'RH' = 2, 'RL' = 3, 'FV' = 4)
+num.dat$MSZone.price.lvl <- as.numeric(mszoning.lvl[data[,'MSZoning']])
+
+```
+
+##Binary Features
+```{r binary features, echo=TRUE}
+
+#LotShape - Regular & Irregular
+  price.tbl('LotShape')
+
+num.dat['LotShapeReg'] <- (data$LotShape == 'Reg') *1
+num.dat['LandContourLvl'] <- (data$LandContour == 'Lvl') *1
+num.dat['LandSlopeGtl'] <- (data$LandSlope == 'Gtl') *1
+num.dat['CdsFr3LotConfig'] <- (data$LotConfig == 'CulDSac' | data$LotConfig == 'FR3') *1
+num.dat['PubUtilities'] <- (data$Utilities == 'AllPub') *1 #all but 1 obs is not Pub
+num.dat['ElectricalStd'] <- (data$Electrical == 'SBrkr') *1
+num.dat['AttchdGarage'] <- (data$GarageType == 'Attchd' | data$GarageType == 'BuiltIn') *1 #Attch & BuiltIn have higher saleprices.
+num.dat['PavedDriveY'] <- (data$PavedDrive == 'Y') *1
+num.dat['ShedMcFeat'] <- (data$MiscFeature == 'Shed') *1
+num.dat['HasMasVnr'] <- (data$MasVnrArea > 0) *1
+num.dat['Has2ndFlr'] <- (data$X2ndFlrSF > 0) *1
+num.dat['HasWoodDeck'] <- (data$WoodDeckSF > 0) *1
+num.dat['HasRemodeled'] <- (data$YearBuilt != data$YearRemodAdd) *1
+num.dat['RecentRemoded'] <- (data$YearRemodAdd == data$YrSold) *1
+num.dat['NewHouse'] <- (data$YearBuilt == data$YrSold) *1
+num.dat['HasOpenPorch'] <- (data$OpenPorchSF > 0) *1
+num.dat['HasEnclosedPorch'] <- (data$EnclosedPorch > 0) *1
+num.dat['Has3ssPorch'] <- (data$X3SsnPorch > 0) *1
+num.dat['HasScreenPorch'] <-(data$ScreenPorch > 0) *1
+num.dat['PositiveFeat1'] <- (data$Condition1 == 'PosA' | data$Condition1 == 'PosN') *1 #Group together houses close to positive features like parks...etc
+
+num.dat['PositiveFeat2'] <- (data$Condition2 == 'PosA' | data$Condition2 == 'PosN') *1
+
+num.dat['GdMasVnr'] <- (data$MasVnrType == 'BrkFace' | data$MasVnrType == 'Stone') *1 #Grouped BrkFace & Stone together. Over $200k saleprice.
+
+num.dat['GasHeating'] <- (data$Heating == 'GasW' | data$Heating == 'GasA') *1 #Gas heating has significant higher saleprice.
+
+num.dat['HasCentralAir'] <- (data$CentralAir == 'Y') *1
+num.dat['NoAlley'] <- (data$Alley == 'None') *1 #No alley way results in higher saleprice
+num.dat['Age'] <- as.numeric(2010 - data$YearBuilt)
+```
+
+##Cleaned and Transformed Data
+```{r Save As Clean & Transformed Data, echo = TRUE}
+mdata <- num.dat
+```
+
+##Decision Tree - Data Split + Decision Tree Model
+```{r Decision Tree, echo=TRUE}
+###Data for Decision Trees
+clean.data <- clean.data[-c(which(clean.data$GrLivArea > 4000)),] #remove outliers
+
+#Bin SalePrice into bins; low,med,high,
+price.check <- function(x) {
+  if(clean.data$SalePrice[x] <= 140000) {
+    print('Low')
+  } else {
+    if(clean.data$SalePrice[x] <= 200000) {
+      print('Medium')
+    } else {
+      print("High")
+    }
+  }
+}
+
+
+x = 1
+for(i in 1:nrow(clean.data)) {
+  clean.data$Price.Level[x] <- price.check(x)
+  x = x + 1
+}
+
+# Final dataset with all char turned to factors
+clean.data <- as.data.frame(unclass(clean.data))
+
+##################################################################################################
+
+###Decision Tree - spliting data into train/testing (70/30)
+dectrain <- clean.data[train.idx,]
+dectest <- clean.data[-train.idx,]
+dectrain.2 <- dectrain #back up
+dectest.2 <- dectest #back up
+dectrain <- subset(dectrain, select = -c(Id, SalePrice))
+dectest <- subset(dectest, select = -c(Id, SalePrice, Price.Level))
+
+###Decision Tree
+
+###Decision Tree Model with rpart (Decision Tree)
+
+dec.mod2 <- rpart(Price.Level ~ ., data = dectrain)
+dec.predict2 <- predict(dec.mod2, type = "class", dectest)
+
+confMat.r <- table(dec.predict2, dectest.2$Price.Level)
+decmod2.acc <- sum(diag(confMat.r))/sum(confMat.r) ##Accuracy 0.7437071
+
+printcp(dec.mod2)
+plotcp(dec.mod2)
+
+#plot the actual tree
+prp(dec.mod2)
+
+```
+
+##Multiple Regression - Divide data into Train and Test sets
+```{r Train & Test Sets, echo=TRUE}
+
+mdata <- mdata[-c(which(mdata$GrLivArea > 4000)),] #cleaned, converted cat to num, no outliers.
+
+###Regression - Spliting the Data into train/test sets (70/30)
+#index.trainBU <- train.idx #backup
+train.idx <- sample(nrow(mdata), 0.7*nrow(mdata))
+train <- mdata[train.idx,]
+test <- mdata[-train.idx,]
+train.2 <- train #back-up
+test.2 <- test #back-up
+train <- subset(train, select = -c(Id))
+test <- subset(test, select = -c(Id, SalePrice))
+```
+
+##Linear Regression Model - All variables
+```{r lm model, echo=TRUE}
+###Linear Regression
+
+####Model 1 - 10 feat - Highest Correlation Attributes
+
+lr.mod1 <- lm(SalePrice ~ OverallQual + GrLivArea + GarageCars + GarageArea + 
+                TotalBsmtSF + X1stFlrSF + FullBath + TotRmsAbvGrd + YearBuilt + 
+                YearRemodAdd, data = train)
+summary(lr.mod1) #r2 @ 0.8158
+
+lr.predict1 <- predict(lr.mod1, type = "response", newdata = test)
+lr.eval1 <- as.data.frame(cbind(SalePrice = test.2$SalePrice, PredictPrice = lr.predict1))
+eval1.rmse <- rmse(lr.eval1$SalePrice, lr.eval1$PredictPrice)
+eval1.rmse #$28781.54
+head(lr.eval1,25)
+
+#residual plots
+res.plot1 <- plot(lr.eval1$SalePrice, (lr.eval1$SalePrice-lr.eval1$PredictPrice), ylab="Residuals", xlab="SalePrice",main="Residual Plot - Regression Model 1")
+abline(0,0)
+
+#################################################################################################
+
+####Model 2 - Include all 89 Variables incl cat to num.
+lr.mod2 <- lm(SalePrice ~ ., data = train)
+summary(lr.mod2) #r2 @ 0.8964
+
+lr.predict2 <- predict(lr.mod2, type = "response", newdata = test)
+lr.eval2 <- as.data.frame(cbind(SalePrice = test.2$SalePrice, PredictPrice = lr.predict2))
+eval2.rmse <- rmse(lr.eval2$SalePrice, lr.eval2$PredictPrice)
+eval2.rmse #$23,155.12
+head(lr.eval2,25)
+
+#Residual Plot
+res.plot2 <- plot(lr.eval2$SalePrice, (lr.eval2$SalePrice-lr.eval2$PredictPrice), ylab="Residuals", xlab="SalePrice",main="Residual Plot - Regression Model 2")
+abline(0,0)
+
+####Model 3 - Stepwise regression to select variables
+fit <- lm(SalePrice ~ ., data = train)
+stepwise <- stepAIC(fit, direction = "both")
+stepwise$anova #shows the variables selected
+
+lr.mod3 <- lm(SalePrice ~ MSSubClass + LotFrontage + LotArea + OverallQual + 
+                OverallCond + YearBuilt + YearRemodAdd + MasVnrArea + BsmtFinSF1 + 
+                BsmtFinSF2 + BsmtUnfSF + X1stFlrSF + X2ndFlrSF + BsmtHalfBath + 
+                BedroomAbvGr + KitchenAbvGr + TotRmsAbvGrd + GarageYrBlt + 
+                GarageCars + WoodDeckSF + OpenPorchSF + ScreenPorch + ExterQual + 
+                ExterCond + BsmtCond + KitchenQual + GarageQual + BsmtExposure + 
+                Functional + HipShedRoof + nbh.price.lvl + Ext1st.price.lvl + 
+                SaleType.price.lvl + SaleCond.price.lvl + CdsFr3LotConfig + 
+                PubUtilities + AttchdGarage + HasMasVnr + Has2ndFlr + HasRemodeled + 
+                NewHouse + HasOpenPorch + HasScreenPorch + PositiveFeat1 + 
+                GdMasVnr, data = train)
+summary(lr.mod3) #r2 @ 0.8988
+
+lr.predict3 <- predict(lr.mod3, type = "response", newdata = test)
+lr.eval3 <- as.data.frame(cbind(SalePrice = test.2$SalePrice, PredictPrice = lr.predict3))
+eval3.rmse <- rmse(lr.eval3$SalePrice, lr.eval3$PredictPrice)
+eval3.rmse #$22697.29
+head(lr.eval3,25)
+
+
+#Residual Plots
+res.plot3 <- plot(lr.eval3$SalePrice, (lr.eval3$SalePrice-lr.eval3$PredictPrice), ylab="Residuals", xlab="SalePrice",main="Residual Plot - Regression Model 3")
+abline(0,0)
+```
+
+##One-Hot Encoding - Weka's way of transforming cat variables to num variables
+```{r one hot encoding, echo=true}
+####Model 4 - Numeric + 1 hot encoding #not included in report
+h.data <- data.clean
+h.data <- h.data[-c(which(h.data$GrLivArea > 4000)),]
+#numeric - 38 variables
+ohnum.col <- names(which(sapply(h.data, is.numeric)))
+ohnum.dat <- h.data[,ohnum.col]
+#catogorical - 43 variables
+ohcat.col <-names(which(sapply(h.data, is.character)))
+ohcat.dat <- h.data[,ohcat.col]
+
+####One-hot Encoding 
+dummy <- dummyVars("~ .", data = h.data[,ohcat.col])
+ohcat.dat1h <- data.frame(predict(dummy, newdata = h.data[,ohcat.col])) #266 variables
+
+oh.df <- cbind(ohnum.dat, ohcat.dat1h)
+oh.df <- oh.df[-c(which(oh.df$GrLivArea > 4000)),] # removed outliers
+
+ohtrain.idx <- sample(nrow(oh.df), 0.7*nrow(oh.df))
+oh.train <- oh.df[ohtrain.idx,]
+oh.test <- oh.df[-ohtrain.idx,]
+oh.train.2 <- oh.train
+oh.test.2 <- oh.test
+oh.train <- subset(oh.train, select = -c(Id))
+oh.test <- subset(oh.test, select = -c(Id, SalePrice))
+
+
+model.1h <- lm(SalePrice ~ ., data = oh.train)
+summary(model.1h)
+
+predict.1h <- predict(model.1h, type = "response", newdata = oh.test)
+lr.eval4 <- as.data.frame(cbind(SalePrice = oh.test.2$SalePrice, PredictPrice = predict.1h))
+eval4.rmse <- rmse(lr.eval4$SalePrice, lr.eval4$PredictPrice)
+rmse(eval.test1h$V1, eval.test1h$predict.1h) #39058.19
+##RMSE is too high.
+
+```
+
+
+##Random Forest Model
+```{r Random Forest, echo=TRUE}
+
+###Randon Forest
+
+####Model - RF with all variables
+rf.mod1 <- randomForest(SalePrice ~ ., data = train)
+summary(rf.mod1)
+
+rf.predict1 <- predict(rf.mod1, type = "response", newdata = test)
+rf.eval1 <- as.data.frame(cbind(SalePrice = test.2$SalePrice, PredictPrice = rf.predict1))
+eval1.rmse <- rmse(rf.eval1$SalePrice, rf.eval1$PredictPrice)
+eval1.rmse 
+#RMSE $20365.42
+
+importance(rf.mod1)
+print(rf.mod1)
+
+rf.residuals <- resid(rf.mod1)
+rf.plot1 <- plot(rf.eval1$SalePrice, (rf.eval1$SalePrice-rf.eval1$PredictPrice), ylab="Residuals", xlab="SalePrice",main="Residual Plot - Random Forest")
+abline(0,0)
+
+```
+##Bonus - LASSO Regression - Experimenting with other models as recommended by literature
+```{r LASSO Regression, echo=true}
+#glmnet
+
+#Lasso Data
+num.data <- mdata
+y.saleprice <- mdata$SalePrice
+scaler <- preProcess(num.data)
+num.data <- predict(scaler, num.data)
+cat1h.data <- ohcat.dat1h
+
+df <- cbind(num.data, cat1h.data)
+df <- subset(df, select = -c(Id,SalePrice))
+df <- cbind(df,y.saleprice)
+
+#Filter attributes using near zero variance from Caret package
+nzv.data <- nearZeroVar(df, saveMetrics = TRUE)
+drop.cols <- rownames(nzv.data)[nzv.data$nzv == TRUE]
+df <- df[,!names(df) %in% drop.cols] #166 variables
+
+lasso.train.idx <- sample(nrow(df), 0.7*nrow(df))
+lass.train <- df[lasso.train.idx,]
+lass.test <- df[-lasso.train.idx,]
+lass.train2 <- lass.train
+lass.test2 <- lass.test
+
+y.train<- lass.train$y.saleprice
+y.test <- lass.test2$y.saleprice
+
+lass.train<-subset(lass.train, select = -y.saleprice)
+lass.test<-subset(lass.test, select = -y.saleprice)
+
+##################
+y.logtrain <- log(y.train)
+y.logtest <- log(y.test)
+
+#Lasso Penalty
+glm.cv.lasso <- cv.glmnet(x = as.matrix(lass.train), y = y.train, alpha =1)
+penalty.lasso <- glm.cv.lasso$lambda.min
+
+#Lasso Model
+glm.lasso <- glmnet(x = as.matrix(lass.train), y = y.train, alpha = 1, lambda = penalty.lasso)
+lass.predict <- as.numeric(predict(glm.lasso, as.matrix(lass.test)))
+
+rmse(lass.test2$y.saleprice, lass.predict) #$21,887.58
+
+
+####################################################################################################
+#model 2 with Log
+
+#Lasso Penalty
+glm.cv.lasso2 <- cv.glmnet(x = as.matrix(lass.train), y = y.logtrain, alpha =1)
+penalty.lasso2 <- glm.cv.lasso2$lambda.min
+
+#Lasso Model
+glm.lasso2 <- glmnet(x = as.matrix(lass.train), y = y.logtrain, alpha = 1, lambda = penalty.lasso2)
+lass.predict2 <- as.numeric(predict(glm.lasso2, as.matrix(lass.test)))
+
+lass2.eval <- data.frame(cbind())
+rmse(lass.test2$y.saleprice, exp(lass.predict2)) #$19,543.6
+rmse(log(lass.test2$y.saleprice), lass.predict2) #0.112658
+
+lass2.residuals <- resid(glm.lasso2)
+lass2.plot2 <- plot(y.logtrain, lass2.residuals, ylab="Residuals", xlab="SalePrice",main="Residual Plot - lasso model2")
+abline(0,0)
+
+lass2.plot2 <- plot(y.logtest, (y.logtest-lass.predict2), ylab="Residuals", xlab="Log SalePrice",main="Residual Plot - Lasso Model")
+abline(0,0)
+
+```
+
